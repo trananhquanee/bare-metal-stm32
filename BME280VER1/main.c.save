@@ -1,0 +1,578 @@
+#include <stdint.h>
+//===================================
+//LAYER 0: REGISTER MAP
+//===================================
+
+//RCC
+#define RCC_BASE     0x40021000UL
+#define RCC_APB1ENR  (*((volatile uint32_t*)(RCC_BASE + 0x1C)))
+#define RCC_APB2ENR  (*((volatile uint32_t*)(RCC_BASE + 0x18)))
+
+//GPIOA
+#define GPIOA_BASE   0x40010800UL
+#define GPIOA_CRH    (*((volatile uint32_t*)(GPIOA_BASE + 0x04)))
+#define GPIOA_ODR    (*((volatile uint32_t*)(GPIOA_BASE + 0x0C)))
+
+//GPIOB
+#define GPIOB_BASE   0x40010C00UL
+#define GPIOB_CRL    (*((volatile uint32_t*)(GPIOB_BASE + 0x00)))
+#define GPIOB_ODR    (*((volatile uint32_t*)(GPIOB_BASE + 0x0C)))
+
+//I2C1
+#define I2C_BASE     0x40005400UL
+#define I2C_CR1      (*((volatile uint32_t*)(I2C_BASE + 0x00)))
+#define I2C_CR2      (*((volatile uint32_t*)(I2C_BASE + 0x04)))
+#define I2C_DR       (*((volatile uint32_t*)(I2C_BASE + 0x10)))
+#define I2C_SR1      (*((volatile uint32_t*)(I2C_BASE + 0x14)))
+#define I2C_SR2      (*((volatile uint32_t*)(I2C_BASE + 0x18)))
+#define I2C_CCR      (*((volatile uint32_t*)(I2C_BASE + 0x1C)))
+#define I2C_TRISE    (*((volatile uint32_t*)(I2C_BASE + 0x20)))
+
+//USART
+#define USART_BASE  0x40013800UL
+#define USART_SR    (*((volatile uint32_t*)(USART_BASE + 0x00)))
+#define USART_DR    (*((volatile uint32_t*)(USART_BASE + 0x04)))
+#define USART_BRR   (*((volatile uint32_t*)(USART_BASE + 0x08)))
+#define USART_CR1   (*((volatile uint32_t*)(USART_BASE + 0x0C)))
+
+//Systick
+#define SYSTICK_BASE    0xE000E010UL
+#define STK_CTRL        (*(volatile uint32_t *)(SYSTICK_BASE + 0x00))
+#define STK_LOAD        (*(volatile uint32_t *)(SYSTICK_BASE + 0x04))
+#define STK_VAL         (*(volatile uint32_t *)(SYSTICK_BASE + 0x08))
+#define STK_CALIB       (*(volatile uint32_t *)(SYSTICK_BASE + 0x0C))
+#define STK_CTRL_ENABLE    (1 << 0)
+#define STK_CTRL_TICKINT   (1 << 1)
+#define STK_CTRL_CLKSOURCE (1 << 2)
+#define STK_CTRL_COUNTFLAG (1 << 16)
+
+//SR1 Bit position
+#define I2C_SR1_SB   (1 << 0)
+#define I2C_SR1_ADDR (1 << 1)
+#define I2C_SR1_RXNE (1 << 6)
+#define I2C_SR1_TXE  (1 << 7)
+#define I2C_SR1_BTF  (1 << 2)
+#define USART_SR_TXE (1 << 7)
+#define USART_SR_TC  (1 << 6)
+
+//BME280
+#define BME280_ADDR           0x76
+#define BME280_REG_ID         0xD0
+#define BME280_ID_VALUE       0x60
+#define BM280_RESET           0xE0
+#define BME280_CTRL_HUM       0xF2
+#define BME280_STATUS         0xF3
+#define BME280_CTRL_MEAS      0xF4
+#define BME280_CONFIG         0xF5
+#define BME280_REG_PRESS_MSB  0xF7
+#define BME280_REG_TEMP_MSB   0xFA
+#define BME280_REG_HUM_MSB    0xFD
+
+typedef struct{
+   //temperature
+   uint16_t dig_T1;
+   int16_t  dig_T2;
+   int16_t  dig_T3;
+   //pressure
+   uint16_t dig_P1;
+   int16_t  dig_P2;
+   int16_t  dig_P3;
+   int16_t  dig_P4;
+   int16_t  dig_P5;
+   int16_t  dig_P6;
+   int16_t  dig_P7;
+   int16_t  dig_P8;
+   int16_t  dig_P9;
+   //humidity
+   uint8_t  dig_H1;
+   int16_t  dig_H2;
+   uint8_t  dig_H3;
+   int16_t  dig_H4;
+   int16_t  dig_H5;
+   int8_t   dig_H6;
+}BME280_Calib_t;
+BME280_Calib_t calib;
+
+//LAYER 4
+#define dig_T1 calib.dig_T1
+#define dig_T2 calib.dig_T2
+#define dig_T3 calib.dig_T3
+#define dig_P1 calib.dig_P1
+#define dig_P2 calib.dig_P2
+#define dig_P3 calib.dig_P3
+#define dig_P4 calib.dig_P4
+#define dig_P5 calib.dig_P5
+#define dig_P6 calib.dig_P6
+#define dig_P7 calib.dig_P7
+#define dig_P8 calib.dig_P8
+#define dig_P9 calib.dig_P9
+#define dig_H1 calib.dig_H1
+#define dig_H2 calib.dig_H2
+#define dig_H3 calib.dig_H3
+#define dig_H4 calib.dig_H4
+#define dig_H5 calib.dig_H5
+#define dig_H6 calib.dig_H6
+
+typedef struct{
+   uint32_t press;
+   uint32_t temp;
+   uint32_t hum;
+}BME280_Raw_t;
+BME280_Raw_t raw;
+
+typedef int32_t  BME280_S32_t;
+typedef uint32_t BME280_U32_t;
+typedef int64_t  BME280_S64_t;
+volatile uint32_t msTicks = 0;
+
+//=======================================
+//LAYER1: I2C LOW-LEVEL
+//=======================================
+
+void i2c_init(void){
+   RCC_APB2ENR |= (1 << 3) | (1 << 0);
+   RCC_APB1ENR |= (1 << 21);
+
+   GPIOB_CRL   &= ~(0xFF << 24);
+   GPIOB_CRL   |= (0xFF  << 24);
+
+   //RST I2C
+   I2C_CR1 |= (1 << 15);
+   I2C_CR1 &= ~(1 << 15);
+
+   //clock
+   I2C_CR2 = 8;
+
+   //CCR: standard mode 100kHz
+   //CCR = T_SCL / (2 × T_PCLK1) = (1/f_SCL) / (2 × 1/f_PCLK1) = f_PCLK1 / (2 × f_SCL)
+   //CCR = 8,000,000 / (2 × 100,000) = 8,000,000 / 200,000 = 40
+   I2C_CCR = 40;
+
+   //TRISE
+   //TRISE = (t_rise_max / T_PCLK1) + 1
+   //T_PCLK1 = 1 / 8MHz = 125ns
+   //TRISE = (1000ns / 125ns) + 1 = 8 + 1 = 9
+   I2C_TRISE = 9;
+
+   //I2C ENABLE
+   I2C_CR1 |= (1 << 0);
+}
+
+void i2c_start(void){
+   I2C_CR1 |= (1 << 8);
+
+   //WAIT FOR SB(START BIT) = 1
+   while(!(I2C_SR1 & I2C_SR1_SB));
+}
+
+void i2c_stop(void){
+   I2C_CR1 |= (1 << 9);
+}
+
+void i2c_send_addr(uint8_t addr, uint8_t rw){
+   I2C_DR = (addr << 1) | rw;
+   while(!(I2C_SR1 & I2C_SR1_ADDR));
+   // ADDR flag is cleared by software reading SR1 register followed by reading SR2 register
+   // Using (void) casting to prevent compiler from optimizing out these mandatory reads
+   (void)I2C_SR1; 
+   (void)I2C_SR2;
+}
+
+void i2c_write_byte (uint8_t data){
+   while(!(I2C_SR1 & I2C_SR1_TXE));
+   I2C_DR = data;
+   while(!(I2C_SR1 & I2C_SR1_BTF));
+}
+
+uint8_t i2c_read_byte_ack(void){
+   I2C_CR1 |= (1 << 10);
+   while(!(I2C_SR1 & I2C_SR1_RXNE));
+   //Read DR to get data and auto-clear RXNE flag
+   return(uint8_t)I2C_DR;
+}
+
+uint8_t i2c_read_byte_nack(void){
+   I2C_CR1 &= ~(1 << 10); // NACK to indicate the last byte.
+   i2c_stop();
+   while(!(I2C_SR1 & I2C_SR1_RXNE));
+   return(uint8_t)I2C_DR;
+}
+
+void i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t data){
+    i2c_start();
+    i2c_send_addr(addr, 0);
+    i2c_write_byte(reg);
+    i2c_write_byte(data);
+    i2c_stop();
+}
+
+uint8_t i2c_read_reg(uint8_t addr, uint8_t reg){
+    i2c_start();
+    i2c_send_addr(addr, 0);
+    i2c_write_byte(reg);
+    i2c_start();
+    i2c_send_addr(addr, 1);
+    return i2c_read_byte_nack();
+}
+
+// ============================================================
+// LAYER 2: USART
+// ============================================================
+
+rvoid uart_init(void){
+   RCC_APB2ENR |= (1 << 2) | (1 << 14);
+   GPIOA_CRH &= ~(0x0F << 4);
+   GPIOA_CRH |= (0x0A << 4);
+
+   USART_BRR = 833;
+   USART_CR1 |= (1 << 3);
+   USART_CR1 |= (1 << 13);
+}
+
+void uart_send_char(char c){
+   while(!(USART_SR & USART_SR_TXE));
+   USART_DR = c;
+}
+
+void uart_send_string(const char* s){
+   while(*s)uart_send_char(*s++);
+}
+
+void uart_send_int(int32_t n) {
+    if (n == 0) {
+        uart_send_char('0');
+        return;
+    }
+
+    uint32_t num; // Dùng biến không dấu để chứa giá trị tuyệt đối
+    if (n < 0) {
+        uart_send_char('-');
+        // Ép kiểu để xử lý an toàn INT32_MIN (-2147483648)
+        num = (uint32_t)-(n + 1) + 1; 
+        // Hoặc đơn giản hơn: num = (uint32_t)-n; (với hầu hết compiler hiện đại)
+    } else {
+        num = (uint32_t)n;
+    }
+
+    char buf[10]; // int32 tối đa 10 chữ số
+    uint8_t i = 0;
+
+    // Lấy từng chữ số từ phải sang trái
+    while (num > 0) {
+        buf[i++] = '0' + (num % 10);
+        num /= 10;
+    }
+
+    // In ngược lại
+    while (i > 0) {
+        uart_send_char(buf[--i]);
+    }
+}
+void uart_send_fixed(int32_t n, uint8_t decimals) {
+    // 1. Xử lý số âm
+    if (n < 0) {
+        uart_send_char('-');
+        n = -n;
+    }
+
+    // 2. Tính toán divisor (10, 100, 1000...)
+    int32_t divisor = 1;
+    for (uint8_t i = 0; i < decimals; i++) divisor *= 10;
+
+    // 3. Tách phần nguyên và phần thập phân
+    int32_t integer_part = n / divisor;
+    int32_t fraction_part = n % divisor;
+
+    // 4. In phần nguyên
+    uart_send_int(integer_part);
+
+    // 5. In dấu chấm
+    if (decimals > 0) {
+        uart_send_char('.');
+
+        // 6. XỬ LÝ SỐ 0 DẪN ĐẦU TRONG PHẦN THẬP PHÂN (QUAN TRỌNG)
+        // Ví dụ: .03 thì divisor/10 = 10. Mà 3 < 10 nên phải in thêm số '0'
+        int32_t temp_div = divisor / 10;
+        while (temp_div > 1 && fraction_part < temp_div) {
+            uart_send_char('0');
+            temp_div /= 10;
+        }
+
+        // Cuối cùng mới in giá trị phần dư
+        if (fraction_part == 0) {
+            // Nếu phần dư bằng 0, in thêm các số 0 cho đủ số chữ số decimals
+            // (Ví dụ 25.00)
+            for(uint8_t i = 1; i < decimals; i++) uart_send_char('0');
+            uart_send_char('0');
+        } else {
+            uart_send_int(fraction_part);
+        }
+    }
+}
+
+void uart_send_bme280_humidity(uint32_t h_raw) {
+    uint32_t integer_part = h_raw >> 10;
+    uint32_t remainder = h_raw & 1023;
+    // Lấy 2 chữ số thập phân
+    uint32_t decimal_part = (remainder * 100) / 1024;
+
+    uart_send_int(integer_part);
+    uart_send_char('.');
+    if (decimal_part < 10) uart_send_char('0'); // Bù số 0: ví dụ .05
+    uart_send_int(decimal_part);
+    uart_send_char('%');
+}
+// ============================================================
+// LAYER: 3 SYSTICK
+// ============================================================
+void systick_init(void) {
+    // 1. Dừng SysTick trước khi cấu hình
+    STK_CTRL = 0;
+
+    // 2. Nạp giá trị LOAD để tạo ra ngắt mỗi 1ms
+    // chọn bit bit2 = 0 thì nguồn AHB/8 (8MHz / 8 = 1MHz), nhưng ở đây chọn bit 2 = 1 thì AHB không chia 8
+    // 1.000.000 ticks mỗi giây => 1.000 ticks mỗi mili giây
+    STK_LOAD = 1000 - 1 ;
+
+    // 3. Xóa giá trị hiện tại
+    STK_VAL = 0;
+
+    // 4. Cấu ình và Bật SysTick
+    // Bit 2 = 0: Nguồn Clock AHB/8
+    // Bit 1 = 1: Cho phép ngắt (nếu muốn dùng ngắt để đếm thời gian hệ thống)
+    // Bit 0 = 1: Bật SysTick
+    STK_CTRL = (STK_CTRL_TICKINT | STK_CTRL_ENABLE) & ~STK_CTRL_CLKSOURCE;
+}
+void SysTick_Handler(void) {
+    msTicks++; // Cứ mỗi 1ms, biến này tăng lên 1
+}
+void delay_ms(uint32_t ms) {
+    uint32_t startTicks = msTicks;
+    while ((msTicks - startTicks) < ms) {
+        // Đứng đợi cho đến khi chênh lệch ticks đạt mức yêu cầu
+        // Có thể thêm lệnh __WFI() (Wait For Interrupt) ở đây để tiết kiệm điện
+    }
+}
+// ============================================================
+// LAYER 4: BME280 DRIVER
+// ============================================================
+
+uint8_t verify_id(void){
+   uint8_t chipid;
+
+   i2c_start();
+   i2c_send_addr(BME280_ADDR, 0);//write
+   i2c_write_byte(BME280_REG_ID);
+
+   i2c_start();
+   i2c_send_addr(BME280_ADDR, 1); //read
+   chipid = i2c_read_byte_nack();
+
+   return (chipid == BME280_ID_VALUE)? 1 : 0;
+}
+
+void read_calib(void){
+
+   uint8_t buf1[24];
+   uint8_t buf2[7];
+
+   i2c_start();
+   i2c_send_addr(BME280_ADDR, 0);
+   i2c_write_byte(0x88);
+
+   i2c_start();
+   i2c_send_addr(BME280_ADDR, 1);
+   for(int i = 0; i < 23; i++){
+      buf1[i] = i2c_read_byte_ack();   // 23 bytes đầu ACK
+   }
+   buf1[23] = i2c_read_byte_nack();
+
+   dig_T1 = (buf1[1]  << 8) | buf1[0];
+   dig_T2 = (int16_t)((buf1[3]  << 8) | buf1[2]);
+   dig_T3 = (int16_t)((buf1[5]  << 8) | buf1[4]);
+
+   dig_P1 = (buf1[7]  << 8) | buf1[6];
+   dig_P2 = (int16_t)((buf1[9]  << 8) | buf1[8]);
+   dig_P3 = (int16_t)((buf1[11] << 8) | buf1[10]);
+   dig_P4 = (int16_t)((buf1[13] << 8) | buf1[12]);
+   dig_P5 = (int16_t)((buf1[15] << 8) | buf1[14]);
+   dig_P6 = (int16_t)((buf1[17] << 8) | buf1[16]);
+   dig_P7 = (int16_t)((buf1[19] << 8) | buf1[18]);
+   dig_P8 = (int16_t)((buf1[21] << 8) | buf1[20]);
+   dig_P9 = (int16_t)((buf1[23] << 8) | buf1[22]);
+
+   i2c_start();
+   i2c_send_addr(BME280_ADDR, 0);
+   i2c_write_byte(0xA1);
+
+   i2c_start();
+   i2c_send_addr(BME280_ADDR, 1);
+   dig_H1 = i2c_read_byte_nack();
+
+   i2c_start();
+   i2c_send_addr(BME280_ADDR, 0);
+   i2c_write_byte(0xE1);
+
+   i2c_start();
+   i2c_send_addr(BME280_ADDR, 1);
+   for(int j = 0; j < 6; j++){
+      buf2[j] = i2c_read_byte_ack();
+   }
+   buf2[6] = i2c_read_byte_nack();
+
+   dig_H2 = (int16_t)((buf2[1] << 8) | buf2[0]);
+   dig_H3 = buf2[2];
+   dig_H4 = (int16_t)((buf2[3] << 4) | (buf2[4] & 0x0F));
+   dig_H5 = (int16_t)((buf2[5] << 4) | (buf2[4] >> 4));
+   dig_H6 = (int16_t)(buf2[6]);
+}
+
+void bme280_config(void){
+    // ctrl_hum
+    i2c_write_reg(BME280_ADDR, BME280_CTRL_HUM, 0x01);
+
+    // config (IIR filter)
+    i2c_write_reg(BME280_ADDR, BME280_CONFIG, 0x04 << 2);
+
+    // ctrl_meas
+    i2c_write_reg(BME280_ADDR, BME280_CTRL_MEAS, (1<<5)|(1<<2)|1);
+}
+
+void bme280_read_raw(void){
+
+   while(i2c_read_reg(BME280_ADDR, 0xF3) & (1 << 3));
+
+   uint8_t buf[8];
+   i2c_start();
+   i2c_send_addr(BME280_ADDR, 0);
+   i2c_write_byte(0xF7);
+
+   i2c_start();
+   i2c_send_addr(BME280_ADDR, 1);
+   for(int t = 0; t < 7; t++){
+      buf[t] = i2c_read_byte_ack();
+   }
+   buf[7] = i2c_read_byte_nack();
+
+   raw.press = (uint32_t)((buf[0] << 12) | (buf[1] << 4) | (buf[2] >> 4));
+   raw.temp  = (uint32_t)((buf[3] << 12) | (buf[4] << 4) | (buf[5] >> 4));
+   raw.hum   = (uint32_t)((buf[6] << 8) | (buf[7]));
+}
+
+//// Refer to section 4.2.3 of the BME280 datasheet for the compensation formula.
+
+// Returns temperature in DegC, resolution is 0.01 DegC. Output value of "5123" equals 51.23 DegC.
+// t_fine carries fine temperature as global value
+BME280_S32_t t_fine;
+BME280_S32_t BME280_compensate_T_int32(BME280_S32_t adc_T)
+{
+    BME280_S32_t var1, var2, T;
+    var1 = ((((adc_T >> 3) - ((BME280_S32_t)dig_T1 << 1))) * ((BME280_S32_t)dig_T2)) >> 11;
+    var2 = (((((adc_T >> 4) - ((BME280_S32_t)dig_T1)) * ((adc_T >> 4) - ((BME280_S32_t)dig_T1)))) >> 12) * ((BME280_S32_t)dig_T3) >> 14;
+    t_fine = var1 + var2;
+    T = (t_fine * 5 + 128) >> 8;
+    return T;
+}
+
+// Returns pressure in Pa as unsigned 32 bit integer in Q24.8 format (24 integer bits and 8 fractional bits).
+// Output value of "24674867" represents 24674867/256 = 96386.2 Pa = 963.862 hPa
+BME280_U32_t BME280_compensate_P_int64(BME280_S32_t adc_P)
+{
+    BME280_S64_t var1, var2, p;
+    var1 = ((BME280_S64_t)t_fine) - 128000;
+    var2 = var1 * var1 * (BME280_S64_t)dig_P6;
+    var2 = var2 + ((var1 * (BME280_S64_t)dig_P5) << 17);
+    var2 = var2 + (((BME280_S64_t)dig_P4) << 35);
+    var1 = ((var1 * var1 * (BME280_S64_t)dig_P3) >> 8) + ((var1 * (BME280_S64_t)dig_P2) << 12);
+    var1 = (((((BME280_S64_t)1) << 47) + var1)) * ((BME280_S64_t)dig_P1) >> 33;
+
+    if (var1 == 0)
+    {
+        return 0; // avoid exception caused by division by zero
+    }
+
+    p = 1048576 - adc_P;
+    p = (((p << 31) - var2) * 3125) / var1;
+    var1 = (((BME280_S64_t)dig_P9) * (p >> 13) * (p >> 13)) >> 25;
+    var2 = (((BME280_S64_t)dig_P8) * p) >> 19;
+    p = ((p + var1 + var2) >> 8) + (((BME280_S64_t)dig_P7) << 4);
+    return (BME280_U32_t)p;
+}
+
+// Returns humidity in %RH as unsigned 32 bit integer in Q22.10 format (22 integer and 10 fractional bits).
+// Output value of "47445" represents 47445/1024 = 46.333 %RH
+BME280_U32_t bme280_compensate_H_int32(BME280_S32_t adc_H)
+{
+    BME280_S32_t v_x1_u32r;
+    v_x1_u32r = (t_fine - ((BME280_S32_t)76800));
+v_x1_u32r = (((((adc_H << 14) - (((BME280_S32_t)dig_H4) << 20) - (((BME280_S32_t)dig_H5) * v_x1_u32r)) + ((BME280_S32_t)16384)) >> 15) * (((((((v_x1_u32r * ((BME280_S32_t)dig_H6)) >> 10) * (((v_x1_u32r * ((BME280_S32_t)dig_H3)) >> 11) + 
+                ((BME280_S32_t)32768))) >> 10) + ((BME280_S32_t)2097152)) * ((BME280_S32_t)dig_H2) + 
+                8192) >> 14));
+
+    v_x1_u32r = (v_x1_u32r - (((((v_x1_u32r >> 15) * (v_x1_u32r >> 15)) >> 7) * ((BME280_S32_t)dig_H1)) >> 4));
+
+    v_x1_u32r = (v_x1_u32r < 0 ? 0 : v_x1_u32r);
+    v_x1_u32r = (v_x1_u32r > 419430400 ? 419430400 : v_x1_u32r);
+
+    return (BME280_U32_t)(v_x1_u32r >> 12);
+}
+
+// ======================================================================
+// LAYER 5: MAIN
+// ======================================================================
+
+int main(void){
+   // KHỞI TẠO PHẦN CỨNG (LOW-LEVEL INIT)
+   systick_init();
+   uart_init();
+   i2c_init();
+
+   uart_send_string("\r\n ---BME280 Bare-metal System Starting--- \r\n");
+
+   //BƯỚC 2: KIỂM TRA VÀ CẤU HÌNH CẢM BIẾN (SETUP)
+   if(!verify_id()){
+      uart_send_string("[ERROR] BME280 Sensor not found! System Halted.\r\n");
+      while(1);
+   }
+   uart_send_string("[OK] BME280 Founded.\r\n");
+   // 2. Đọc dữ liệu Calibration (Chỉ đọc 1 lần duy nhất)
+   read_calib();
+   uart_send_string("[OK] Calibration data loaded.\r\n");
+
+   // 3. Cấu hình chế độ đo (Oversampling, Filter, Mode)
+   bme280_config();
+   uart_send_string("[OK] Sensor configured. Entering Loop...\r\n");
+
+   //BƯỚC 3: VÒNG LẶP CHÍNH (OPERATIONAL LOOP)
+   while (1) {
+        // 1. Đọc dữ liệu thô từ thanh ghi (ADC values)
+        bme280_read_raw();
+
+        // 2. Tính toán bù trừ (Compensation)
+        // Lưu ý: t_fine sẽ được cập nhật khi tính Temp,
+        // nên phải tính Temp TRƯỚC khi tính Press và Hum
+        int32_t temp_final = BME280_compensate_T_int32(raw.temp);
+        uint32_t press_final = BME280_compensate_P_int64(raw.press);
+        uint32_t hum_final = bme280_compensate_H_int32(raw.hum);
+
+        // 3. Hiển thị dữ liệu chuyên nghiệp lên UART
+        uart_send_string("T: ");
+        uart_send_fixed(temp_final, 2);
+        uart_send_string(" C | ");
+
+        uart_send_string("P: ");
+        // Pressure trả về đơn vị Pa (Q24.8), ta chia 256 để ra Pa
+        // hoặc in như số thực với 2 chữ số thập phân (đơn vị hPa)
+        // /256 → Pa (ví dụ 100754)
+        // uart_send_fixed(..., 2) → /100 → hPa (1007.54)
+        uart_send_fixed(press_final / 256, 2);
+        uart_send_string(" hPa | ");
+
+        uart_send_string("H: ");
+        uart_send_bme280_humidity(hum_final);
+        uart_send_string("\r\n");
+
+        // 4. Delay để không làm nóng cảm biến và dễ đọc log
+        delay_ms(1000);
+    }
+}
